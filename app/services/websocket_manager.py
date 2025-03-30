@@ -2,6 +2,7 @@ from typing import Dict, List, Any, Optional
 import json
 
 from fastapi import WebSocket
+from app.services.redis import publish_message, subscribe_to_channel
 
 
 class ConnectionManager:
@@ -15,6 +16,10 @@ class ConnectionManager:
         self.user_connections: Dict[int, List[WebSocket]] = {}
         # Track police connections for emergency broadcasts
         self.police_connections: List[WebSocket] = []
+        # Redis channel names
+        self.incident_channel_prefix = "incident:"
+        self.user_channel_prefix = "user:"
+        self.police_channel = "police:all"
     
     async def connect(self, websocket: WebSocket, user_id: int, incident_id: int, is_police: bool = False):
         """
@@ -37,19 +42,21 @@ class ConnectionManager:
         if is_police:
             self.police_connections.append(websocket)
         
-        # Broadcast user's online status to others in the incident
-        await self.broadcast_message(
-            incident_id=incident_id,
-            message={
+        # Broadcast user's online status to others in the incident via Redis
+        await publish_message(
+            f"{self.incident_channel_prefix}{incident_id}",
+            {
                 "type": "user_status",
                 "data": {
                     "user_id": user_id,
                     "status": "online",
                 }
-            },
-            exclude=websocket,
+            }
         )
-    
+        
+        # Subscribe to Redis channels
+        # Note: In a production app, you'd need a background task to handle subscriptions
+        
     def disconnect(self, websocket: WebSocket, user_id: int, incident_id: int):
         """
         Remove a connection when disconnected.
@@ -75,6 +82,18 @@ class ConnectionManager:
         # Remove from police list if present
         if websocket in self.police_connections:
             self.police_connections.remove(websocket)
+        
+        # Broadcast disconnect via Redis
+        publish_message(
+            f"{self.incident_channel_prefix}{incident_id}",
+            {
+                "type": "user_status",
+                "data": {
+                    "user_id": user_id,
+                    "status": "offline",
+                }
+            }
+        )
     
     async def send_message(self, websocket: WebSocket, message: dict):
         """
@@ -89,28 +108,41 @@ class ConnectionManager:
     async def broadcast_message(self, incident_id: int, message: dict, exclude: Optional[WebSocket] = None):
         """
         Broadcast a message to all connected clients for a specific incident.
-        Optionally exclude a specific connection.
+        Also publish to Redis for other instances.
         """
+        # Local broadcast
         if incident_id in self.active_connections:
             for user_id, connection in self.active_connections[incident_id].items():
                 if connection != exclude:
                     await self.send_message(connection, message)
+        
+        # Redis broadcast
+        await publish_message(f"{self.incident_channel_prefix}{incident_id}", message)
     
     async def send_message_to_user(self, user_id: int, message: dict):
         """
         Send a message to all connections of a specific user.
+        Also publish to Redis for other instances.
         """
+        # Local send
         if user_id in self.user_connections:
             for connection in self.user_connections[user_id]:
                 await self.send_message(connection, message)
+        
+        # Redis broadcast
+        await publish_message(f"{self.user_channel_prefix}{user_id}", message)
     
     async def broadcast_to_police(self, message: dict):
         """
         Broadcast a message to all connected police officers.
-        Used for emergency notifications.
+        Also publish to Redis for other instances.
         """
+        # Local broadcast
         for connection in self.police_connections:
             await self.send_message(connection, message)
+        
+        # Redis broadcast
+        await publish_message(self.police_channel, message)
 
 
 # Create a singleton instance
