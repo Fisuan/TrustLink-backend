@@ -204,6 +204,32 @@ async def update_message_status(
     return message
 
 
+async def generate_auto_response(message_content: str, incident_type: str = None) -> str:
+    """
+    Генерирует автоматический ответ на сообщение пользователя.
+    """
+    message_content = message_content.lower()
+    
+    # Экстренные сообщения
+    if any(word in message_content for word in ["помогите", "срочно", "экстренно", "помощь", "спасите", "нападение", "насилие", "угроза"]):
+        return "[АВТООТВЕТЧИК] Ваше сообщение передано оператору службы экстренной помощи. Оставайтесь на связи, оператор ответит вам в ближайшее время."
+    
+    # Запросы о статусе
+    if any(word in message_content for word in ["статус", "состояние", "обновление", "новости", "как дела"]):
+        return "[АВТООТВЕТЧИК] Ваше обращение в обработке. Оператор ответит вам как можно скорее."
+    
+    # Благодарности
+    if any(word in message_content for word in ["спасибо", "благодарю", "отлично", "хорошо", "круто", "здорово"]):
+        return "[АВТООТВЕТЧИК] Рады быть полезными! Если у вас возникнут дополнительные вопросы, не стесняйтесь обращаться."
+    
+    # Приветствия
+    if any(word in message_content for word in ["привет", "здравствуйте", "добрый день", "доброе утро", "добрый вечер", "здравствуй"]):
+        return "[АВТООТВЕТЧИК] Здравствуйте! Чем мы можем вам помочь?"
+    
+    # Общий ответ по умолчанию
+    return "[АВТООТВЕТЧИК] Спасибо за ваше сообщение. Оператор ответит вам в ближайшее время."
+
+
 @router.websocket("/ws/chat/{incident_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -251,9 +277,11 @@ async def websocket_endpoint(
             
             # Process message based on type
             if data.get("type") == "message":
+                message_content = data.get("content", "")
+                
                 # Create a new message in the database
                 message_data = ChatMessageCreate(
-                    content=data.get("content", ""),
+                    content=message_content,
                     incident_id=incident_id,
                 )
                 message = await create_chat_message(
@@ -278,6 +306,42 @@ async def websocket_endpoint(
                     exclude=websocket,  # Don't send back to sender
                 )
                 logger.info(f"Message broadcast: message_id={message.id}, incident_id={incident_id}")
+                
+                # Отправляем автоматический ответ, если пользователь - гражданин
+                if user.role == "citizen":
+                    # Генерируем ответ
+                    auto_response = await generate_auto_response(message_content, incident.incident_type)
+                    
+                    # Создаем сообщение от системы
+                    auto_message_data = ChatMessageCreate(
+                        content=auto_response,
+                        incident_id=incident_id,
+                    )
+                    
+                    # Используем ID системного пользователя или создаем специальный ID для автоответчика
+                    system_user_id = 1  # Предполагается, что у системного пользователя ID = 1
+                    
+                    auto_message = await create_chat_message(
+                        db, obj_in=auto_message_data, sender_id=system_user_id
+                    )
+                    
+                    # Отправляем автоответ всем клиентам (включая отправителя)
+                    await chat_manager.broadcast_message(
+                        incident_id=incident_id,
+                        message={
+                            "type": "new_message",
+                            "data": {
+                                "id": auto_message.id,
+                                "content": auto_message.content,
+                                "sender_id": system_user_id,
+                                "sent_at": auto_message.sent_at.isoformat(),
+                                "is_read": False,
+                                "is_system_message": True,
+                            }
+                        }
+                    )
+                    
+                    logger.info(f"Auto-response sent: message_id={auto_message.id}, incident_id={incident_id}, response={auto_response}")
             
             elif data.get("type") == "typing":
                 # Broadcast typing indicator
@@ -302,7 +366,7 @@ async def websocket_endpoint(
     except Exception as e:
         # Log the error
         logger.error(f"WebSocket error: user_id={user.id}, incident_id={incident_id}, error={str(e)}")
-        await websocket.close(code=1011)  # Internal error 
+        await websocket.close(code=1011)  # Internal error
 
 
 @router.get("/chat/admin/incidents/{incident_id}/messages", response_model=List[ChatMessage])

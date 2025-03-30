@@ -1,7 +1,9 @@
 from typing import Any, List
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
 
 from app.api.deps import get_current_active_user, get_current_police_user
 from app.db.session import get_db
@@ -147,4 +149,123 @@ async def delete_incident_by_id(
             )
     
     incident = await delete_incident(db, id=incident_id)
-    return incident 
+    return incident
+
+
+# Классы для экстренных ситуаций и отчетов
+class EmergencyRequest(BaseModel):
+    message: str
+    location: dict = None
+    address: str = None
+    media: dict = None
+    timestamp: str = None
+
+class ReportRequest(BaseModel):
+    title: str
+    description: str
+    location: dict = None
+    address: str = None
+    media: dict = None
+    timestamp: str = None
+
+@router.post("/incidents/emergency", response_model=dict)
+async def create_emergency(
+    emergency: EmergencyRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """
+    Создать экстренное сообщение и инцидент.
+    """
+    # Создаем инцидент с высоким приоритетом
+    incident_data = IncidentCreate(
+        title="ЭКСТРЕННАЯ СИТУАЦИЯ",
+        description=emergency.message,
+        status="urgent",
+        location=emergency.address or "Неизвестное местоположение",
+        priority="high",
+        incident_type="emergency",
+    )
+    
+    # Сохраняем инцидент
+    incident = await create_incident(db, obj_in=incident_data, user_id=current_user.id)
+    
+    # Создаем сообщение чата с экстренным уведомлением
+    from app.schemas import ChatMessageCreate
+    from app.crud.chat import create_chat_message
+    
+    message_data = ChatMessageCreate(
+        content=f"[ЭКСТРЕННОЕ СООБЩЕНИЕ] {emergency.message}",
+        incident_id=incident.id,
+        is_emergency=True,
+    )
+    
+    message = await create_chat_message(db, obj_in=message_data, sender_id=current_user.id)
+    
+    # Отправляем уведомление всем операторам через WebSocket
+    from app.services.websocket_manager import chat_manager
+    
+    await chat_manager.broadcast_to_police(
+        message={
+            "type": "emergency",
+            "data": {
+                "incident_id": incident.id,
+                "message": emergency.message,
+                "user_id": current_user.id,
+                "user_name": current_user.full_name or "Пользователь",
+                "location": emergency.address,
+                "timestamp": emergency.timestamp or datetime.utcnow().isoformat(),
+                "has_media": emergency.media is not None,
+            }
+        }
+    )
+    
+    # Возвращаем информацию об инциденте
+    return {
+        "success": True,
+        "incident_id": incident.id,
+        "message": "Экстренное сообщение отправлено",
+        "status": "urgent",
+    }
+
+
+@router.post("/incidents/report", response_model=dict)
+async def create_report(
+    report: ReportRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """
+    Создать отчет о происшествии.
+    """
+    # Создаем инцидент
+    incident_data = IncidentCreate(
+        title=report.title,
+        description=report.description,
+        status="new",
+        location=report.address or "Неизвестное местоположение",
+        priority="medium",
+        incident_type="report",
+    )
+    
+    # Сохраняем инцидент
+    incident = await create_incident(db, obj_in=incident_data, user_id=current_user.id)
+    
+    # Создаем сообщение чата с отчетом
+    from app.schemas import ChatMessageCreate
+    from app.crud.chat import create_chat_message
+    
+    message_data = ChatMessageCreate(
+        content=f"[ОТЧЕТ] {report.description}",
+        incident_id=incident.id,
+    )
+    
+    message = await create_chat_message(db, obj_in=message_data, sender_id=current_user.id)
+    
+    # Возвращаем информацию об инциденте
+    return {
+        "success": True,
+        "incident_id": incident.id,
+        "message": "Отчет отправлен",
+        "status": "new",
+    } 

@@ -10,6 +10,12 @@ export const login = async (email, password) => {
       },
       body: `username=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`,
     });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Login failed: ${errorData.detail || response.statusText}`);
+    }
+    
     return await response.json();
   } catch (error) {
     console.error('Login error:', error);
@@ -24,8 +30,20 @@ export const register = async (userData) => {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(userData),
+      body: JSON.stringify({
+        email: userData.email,
+        password: userData.password,
+        full_name: userData.fullName || userData.full_name || "",
+        phone_number: userData.phoneNumber || userData.phone_number || "",
+        role: "citizen" // Устанавливаем роль по умолчанию
+      }),
     });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Registration failed: ${errorData.detail || response.statusText}`);
+    }
+    
     return await response.json();
   } catch (error) {
     console.error('Register error:', error);
@@ -78,4 +96,100 @@ export const connectToChat = (incidentId, token) => {
   };
   
   return socket;
+};
+
+// Экстренные ситуации
+export const sendEmergency = async (token, emergencyData) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/incidents/emergency`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(emergencyData),
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Emergency failed: ${errorData.detail || response.statusText}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error('Send emergency error:', error);
+    throw error;
+  }
+};
+
+// Отчеты о происшествиях
+export const sendReport = async (token, reportData) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/incidents/report`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(reportData),
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Report failed: ${errorData.detail || response.statusText}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error('Send report error:', error);
+    throw error;
+  }
+};
+
+// Получение сообщений чата
+export const getIncidentMessages = async (token, incidentId) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/chat/incidents/${incidentId}/messages`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      }
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Get messages failed: ${errorData.detail || response.statusText}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error('Get messages error:', error);
+    throw error;
+  }
+};
+
+// Отправка сообщения в чат
+export const sendChatMessage = async (token, incidentId, message) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/chat/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        content: message,
+        incident_id: incidentId,
+      }),
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Send message failed: ${errorData.detail || response.statusText}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error('Send message error:', error);
+    throw error;
+  }
 };
