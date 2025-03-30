@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     
     # CORS
-    CORS_ORIGINS: List[str] = []
+    CORS_ORIGINS: List[str] = ["*"]
     
     @validator("CORS_ORIGINS", pre=True)
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
@@ -27,11 +27,11 @@ class Settings(BaseSettings):
         raise ValueError(v)
     
     # Database
-    POSTGRES_SERVER: str = os.getenv("POSTGRES_SERVER", "localhost")
-    POSTGRES_USER: str = os.getenv("POSTGRES_USER", "postgres")
-    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "postgres")
-    POSTGRES_DB: str = os.getenv("POSTGRES_DB", "trustlink")
-    POSTGRES_PORT: int = int(os.getenv("POSTGRES_PORT", "5432"))
+    POSTGRES_SERVER: str = os.getenv("PGHOST", "postgres.railway.internal")
+    POSTGRES_USER: str = os.getenv("PGUSER", "postgres")
+    POSTGRES_PASSWORD: str = os.getenv("PGPASSWORD", "BthJWaTjtqLyOQRSsZISJETaaGOWPjOh")
+    POSTGRES_DB: str = os.getenv("PGDATABASE", "railway")
+    POSTGRES_PORT: int = int(os.getenv("PGPORT", "5432"))
     DATABASE_URI: Optional[PostgresDsn] = None
     
     @validator("DATABASE_URI", pre=True)
@@ -48,15 +48,15 @@ class Settings(BaseSettings):
         )
     
     # Redis
-    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
-    REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
-    REDIS_PASSWORD: Optional[str] = os.getenv("REDIS_PASSWORD")
+    REDIS_HOST: str = "redis.railway.internal"
+    REDIS_PORT: int = 6379
+    REDIS_DB: int = 0
+    REDIS_PASSWORD: Optional[str] = "YtmrPLwDUricFgujtUvUAcnRPaHgnDxX"
     
     class Config:
         case_sensitive = True
         env_file = ".env"
-        extra = "allow"  # Разрешить дополнительные поля
+        extra = "allow"  
 
 
 settings = Settings() 

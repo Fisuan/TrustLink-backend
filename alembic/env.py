@@ -29,9 +29,9 @@ target_metadata = Base.metadata
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
 
-# Переводим URL из асинхронного в синхронное для Alembic
-sync_url = str(settings.DATABASE_URI).replace('+asyncpg', '')
-config.set_main_option("sqlalchemy.url", sync_url)
+# Настройка URL для alembic
+if str(settings.DATABASE_URI):
+    config.set_main_option("sqlalchemy.url", str(settings.DATABASE_URI).replace('+asyncpg', ''))
 
 
 def run_migrations_offline() -> None:
@@ -50,11 +50,8 @@ def run_migrations_offline() -> None:
     context.configure(
         url=url,
         target_metadata=target_metadata,
-        literal_binds=False,
+        literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        # Используем as_sql, чтобы не подключаться к базе данных
-        as_sql=True,
-        compare_type=True,
     )
 
     with context.begin_transaction():
@@ -71,36 +68,26 @@ def do_run_migrations(connection: Connection) -> None:
         context.run_migrations()
 
 
-def run_migrations_online() -> None:
+async def run_migrations_online() -> None:
     """Run migrations in 'online' mode.
 
     In this scenario we need to create an Engine
     and associate a connection with the context.
 
     """
-    # Принудительно использовать offline режим для генерации миграции
-    # без подключения к базе данных
-    # TODO: Удалите эту строку, когда сервер базы данных будет доступен
-    return run_migrations_offline()
-    
-    connectable = config.attributes.get("connection", None)
-    
-    if connectable is None:
-        connectable = context.config.attributes.get("connection", None)
-    
-    if connectable is None:
-        # Используем синхронную строку подключения, заменив asyncpg на psycopg2
-        url = config.get_main_option("sqlalchemy.url")
-        connectable = context.config.attributes.get("connection", None)
-        if connectable is None:
-            from sqlalchemy import create_engine
-            connectable = create_engine(url)
+    # Используем синхронную строку подключения для миграций
+    connectable = create_async_engine(
+        str(settings.DATABASE_URI),
+        poolclass=pool.NullPool,
+    )
 
-    with connectable.connect() as connection:
-        do_run_migrations(connection)
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+
+    await connectable.dispose()
 
 
 if context.is_offline_mode():
     run_migrations_offline()
 else:
-    run_migrations_online() 
+    asyncio.run(run_migrations_online()) 

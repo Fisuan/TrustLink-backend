@@ -14,5 +14,6 @@ httpx==0.24.1
 python-dotenv==1.0.0
 websockets==11.0.3
 redis==4.6.0
-tenacity==8.2.3 
+tenacity==8.2.3
 email-validator==2.1.0
+psycopg2-binary==2.9.5
