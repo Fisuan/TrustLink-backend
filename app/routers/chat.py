@@ -20,6 +20,7 @@ from app.crud.chat import (
 )
 from app.crud.incident import get_incident
 from app.services.websocket_manager import chat_manager
+from pydantic import BaseModel
 
 # Настройка логгера
 logger = logging.getLogger("app.chat")
@@ -372,7 +373,7 @@ async def admin_get_chat_stats(
     logger.info(f"Admin retrieved stats: user_id={current_user.id}, stats={json.dumps(stats)}")
     return stats
 
-@router.websocket("/ws/chat/admin/monitor")
+@router.websocket("/ws/admin/monitor")
 async def admin_monitor_websocket(
     websocket: WebSocket,
     token: str,
@@ -425,11 +426,14 @@ async def admin_monitor_websocket(
         logger.error(f"Admin monitor error: user_id={user.id}, error={str(e)}")
         await websocket.close(code=1011) 
 
+class TestMessageRequest(BaseModel):
+    incident_id: int
+    message: str
+    sender_type: str = "system"  # system, admin, test
+
 @router.post("/chat/admin/send-test-message", response_model=ChatMessage)
 async def admin_send_test_message(
-    incident_id: int,
-    message: str,
-    sender_type: str = "system",  # system, admin, test
+    request: TestMessageRequest,
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> Any:
@@ -445,9 +449,9 @@ async def admin_send_test_message(
         )
     
     # Check if the incident exists
-    incident = await get_incident(db, id=incident_id)
+    incident = await get_incident(db, id=request.incident_id)
     if not incident:
-        logger.warning(f"Test message incident not found: incident_id={incident_id}, user_id={current_user.id}")
+        logger.warning(f"Test message incident not found: incident_id={request.incident_id}, user_id={current_user.id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Incident not found",
@@ -458,11 +462,11 @@ async def admin_send_test_message(
         "system": "[СИСТЕМА] ",
         "admin": "[АДМИН] ",
         "test": "[ТЕСТ] ",
-    }.get(sender_type, "[ТЕСТ] ")
+    }.get(request.sender_type, "[ТЕСТ] ")
     
     message_data = ChatMessageCreate(
-        content=f"{prefix}{message}",
-        incident_id=incident_id,
+        content=f"{prefix}{request.message}",
+        incident_id=request.incident_id,
     )
     
     # Save message to database
@@ -470,11 +474,11 @@ async def admin_send_test_message(
         db, obj_in=message_data, sender_id=current_user.id
     )
     
-    logger.info(f"Admin sent test message: incident_id={incident_id}, user_id={current_user.id}, content={message}")
+    logger.info(f"Admin sent test message: incident_id={request.incident_id}, user_id={current_user.id}, content={request.message}")
     
     # Broadcast to all connected clients for this incident
     await chat_manager.broadcast_message(
-        incident_id=incident_id,
+        incident_id=request.incident_id,
         message={
             "type": "new_message",
             "data": {
@@ -484,9 +488,277 @@ async def admin_send_test_message(
                 "sent_at": created_message.sent_at.isoformat(),
                 "is_read": created_message.is_read,
                 "is_system_message": True,
-                "sender_type": sender_type
+                "sender_type": request.sender_type
             }
         }
     )
     
-    return created_message 
+    return created_message
+
+@router.get("/chat/admin/check", response_model=dict)
+async def admin_check_access(
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """
+    Проверка доступа к админским функциям.
+    """
+    response = {
+        "access": current_user.role in ["admin", "responder"],
+        "role": current_user.role,
+        "user_id": current_user.id,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+    if current_user.role not in ["admin", "responder"]:
+        logger.warning(f"Admin check failed: user_id={current_user.id}, role={current_user.role}")
+    else:
+        logger.info(f"Admin check successful: user_id={current_user.id}, role={current_user.role}")
+    
+    return response 
+
+# Простой класс для получения токена оператора
+class OperatorLoginRequest(BaseModel):
+    email: str
+    password: str
+
+# Упрощенный класс для отправки сообщения
+class OperatorMessageRequest(BaseModel):
+    incident_id: int
+    message: str
+    operator_name: str = "Оператор"
+
+@router.post("/chat/operator/login", response_model=dict)
+async def operator_login(
+    request: OperatorLoginRequest,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """
+    Простой логин для операторов, возвращает токен.
+    """
+    from app.crud.user import authenticate_user
+    from app.core.security import create_access_token
+    from datetime import timedelta
+    from app.core.config import settings
+    
+    # Аутентификация оператора
+    user = await authenticate_user(db, email=request.email, password=request.password)
+    if not user:
+        logger.warning(f"Operator login failed: email={request.email}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Неверный email или пароль",
+        )
+    
+    # Проверка, что пользователь - оператор или админ
+    if user.role not in ["responder", "admin"]:
+        logger.warning(f"Non-operator tried to login: email={request.email}, role={user.role}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Доступ только для операторов",
+        )
+    
+    # Создание токена
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    token = create_access_token(
+        subject=user.id, expires_delta=access_token_expires
+    )
+    
+    logger.info(f"Operator logged in: id={user.id}, email={request.email}")
+    
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user_id": user.id,
+        "role": user.role,
+        "name": user.full_name,
+    }
+
+@router.get("/chat/operator/incidents", response_model=List[dict])
+async def get_operator_incidents(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """
+    Получить список всех инцидентов для оператора.
+    """
+    try:
+        # Проверяем токен
+        user = await get_current_user(db, token=token)
+        if user.role not in ["responder", "admin"]:
+            logger.warning(f"Unauthorized incidents access: user_id={user.id}, role={user.role}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Доступ только для операторов",
+            )
+        
+        # Получаем все инциденты
+        from app.crud.incident import get_incidents
+        incidents = await get_incidents(db)
+        
+        # Преобразуем в формат для отображения
+        result = []
+        for incident in incidents:
+            result.append({
+                "id": incident.id,
+                "title": incident.title,
+                "description": incident.description,
+                "status": incident.status,
+                "user_id": incident.user_id,
+                "created_at": incident.created_at.isoformat(),
+                "updated_at": incident.updated_at.isoformat() if incident.updated_at else None,
+                "location": incident.location,
+                "has_unread_messages": False,  # В будущем можно добавить проверку
+            })
+        
+        logger.info(f"Operator retrieved incidents: user_id={user.id}, count={len(result)}")
+        return result
+    
+    except HTTPException as e:
+        logger.warning(f"Token validation failed: {str(e)}")
+        raise
+    
+    except Exception as e:
+        logger.error(f"Error retrieving incidents: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ошибка при получении инцидентов",
+        )
+
+@router.get("/chat/operator/incidents/{incident_id}/messages", response_model=List[dict])
+async def get_operator_incident_messages(
+    incident_id: int,
+    token: str,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """
+    Получить сообщения для конкретного инцидента (для оператора).
+    """
+    try:
+        # Проверяем токен
+        user = await get_current_user(db, token=token)
+        if user.role not in ["responder", "admin"]:
+            logger.warning(f"Unauthorized messages access: user_id={user.id}, role={user.role}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Доступ только для операторов",
+            )
+        
+        # Проверяем существование инцидента
+        incident = await get_incident(db, id=incident_id)
+        if not incident:
+            logger.warning(f"Incident not found: incident_id={incident_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Инцидент не найден",
+            )
+        
+        # Получаем сообщения
+        messages = await get_incident_messages(db, incident_id=incident_id)
+        
+        # Форматируем сообщения
+        result = []
+        from app.crud.user import get_user
+        for message in messages:
+            # Получаем информацию о пользователе (можно оптимизировать)
+            sender = await get_user(db, id=message.sender_id)
+            sender_name = sender.full_name if sender else "Неизвестный"
+            
+            result.append({
+                "id": message.id,
+                "content": message.content,
+                "sender_id": message.sender_id,
+                "sender_name": sender_name,
+                "sender_role": sender.role if sender else "unknown",
+                "sent_at": message.sent_at.isoformat(),
+                "is_read": message.is_read,
+            })
+        
+        logger.info(f"Operator retrieved messages: user_id={user.id}, incident_id={incident_id}, count={len(result)}")
+        return result
+    
+    except HTTPException as e:
+        logger.warning(f"Token validation failed: {str(e)}")
+        raise
+    
+    except Exception as e:
+        logger.error(f"Error retrieving messages: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Ошибка при получении сообщений",
+        )
+
+@router.post("/chat/operator/send-message", response_model=dict)
+async def operator_send_message(
+    request: OperatorMessageRequest,
+    token: str,
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """
+    Отправить сообщение от имени оператора.
+    """
+    try:
+        # Проверяем токен
+        user = await get_current_user(db, token=token)
+        if user.role not in ["responder", "admin"]:
+            logger.warning(f"Unauthorized message send: user_id={user.id}, role={user.role}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Доступ только для операторов",
+            )
+        
+        # Проверяем существование инцидента
+        incident = await get_incident(db, id=request.incident_id)
+        if not incident:
+            logger.warning(f"Incident not found: incident_id={request.incident_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Инцидент не найден",
+            )
+        
+        # Создаем сообщение
+        operator_prefix = f"[{request.operator_name}] "
+        message_data = ChatMessageCreate(
+            content=f"{operator_prefix}{request.message}",
+            incident_id=request.incident_id,
+        )
+        
+        message = await create_chat_message(
+            db, obj_in=message_data, sender_id=user.id
+        )
+        
+        # Отправляем через WebSocket
+        await chat_manager.broadcast_message(
+            incident_id=request.incident_id,
+            message={
+                "type": "new_message",
+                "data": {
+                    "id": message.id,
+                    "content": message.content,
+                    "sender_id": message.sender_id,
+                    "sender_name": request.operator_name,
+                    "sent_at": message.sent_at.isoformat(),
+                    "is_read": message.is_read,
+                    "is_operator": True,
+                }
+            }
+        )
+        
+        logger.info(f"Operator sent message: user_id={user.id}, incident_id={request.incident_id}, content={request.message}")
+        
+        return {
+            "success": True,
+            "message_id": message.id,
+            "incident_id": request.incident_id,
+            "sent_at": message.sent_at.isoformat(),
+        }
+    
+    except HTTPException as e:
+        logger.warning(f"Token validation failed: {str(e)}")
+        raise
+    
+    except Exception as e:
+        logger.error(f"Error sending message: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при отправке сообщения: {str(e)}",
+        ) 
